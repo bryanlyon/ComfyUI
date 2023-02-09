@@ -9,6 +9,7 @@ import copy
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
+import torch
 
 sys.path.append(os.path.join(sys.path[0], "comfy"))
 
@@ -40,7 +41,7 @@ class CLIPTextEncode:
     def encode(self, clip, text):
         return ([[clip.encode(text), {}]], )
 
-class ConditioningCombineWeighted:
+class ConditioningAddWeighted:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"conditioning_1": ("CONDITIONING", ), "conditioning_2": ("CONDITIONING", ),
@@ -48,13 +49,20 @@ class ConditioningCombineWeighted:
                               "conditioning_2_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1})
                              }}
     RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "combineWeighted"
+    FUNCTION = "addWeighted"
 
     CATEGORY = "conditioning"
+    
 
-    def combineWeighted(self, conditioning_1, conditioning_2, conditioning_1_strength, conditioning_2_strength):
+    def addWeighted(self, conditioning_1, conditioning_2, conditioning_1_strength, conditioning_2_strength):
+        conditioning_1_tensor = conditioning_1[0][0]
+        conditioning_2_tensor = conditioning_2[0][0]
         output = conditioning_1
-        output[0][0] = (conditioning_1[0][0] * conditioning_1_strength + conditioning_2[0][0] * conditioning_2_strength)/(conditioning_1_strength + conditioning_2_strength)
+        if conditioning_1_tensor.shape[1] > conditioning_2_tensor.shape[1]:
+            conditioning_2_tensor = torch.cat((conditioning_2_tensor, torch.zeros((1,conditioning_1_tensor.shape[1] - conditioning_2_tensor.shape[1],768))), dim=1)
+        elif conditioning_2_tensor.shape[1] > conditioning_1_tensor.shape[1]:
+            conditioning_1_tensor = torch.cat((conditioning_1_tensor, torch.zeros((1,conditioning_2_tensor.shape[1] - conditioning_1_tensor.shape[1],768))), dim=1)
+        output[0][0] = (conditioning_1_tensor * conditioning_1_strength + conditioning_2_tensor * conditioning_2_strength)/(conditioning_1_strength + conditioning_2_strength)
         return (output, )
 
 class ConditioningCombine:
@@ -107,6 +115,26 @@ class VAEDecode:
 
     def decode(self, vae, samples):
         return (vae.decode(samples), )
+
+class VAEDecodeMemsafe: # Decode each image one at a time so that we don't run out of memory when decoding large batches
+    def __init__(self, device="cpu"):
+        self.device = device
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "samples": ("LATENT", ), "vae": ("VAE", )}}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "decode"
+
+    CATEGORY = "latent"
+
+    def decode(self, vae, samples):
+        shape = [samples.shape[2]*8,samples.shape[3]*8]
+        output = torch.zeros(0, shape[0], shape[1], 3)
+        for sample in torch.split(samples,1):
+            image = vae.decode(sample)
+            output = torch.cat((output, image), 0)
+        return (output, )
 
 class VAEEncode:
     def __init__(self, device="cpu"):
@@ -570,6 +598,7 @@ NODE_CLASS_MAPPINGS = {
     "CheckpointLoader": CheckpointLoader,
     "CLIPTextEncode": CLIPTextEncode,
     "VAEDecode": VAEDecode,
+    "VAEDecodeMemsafe": VAEDecodeMemsafe,
     "VAEEncode": VAEEncode,
     "VAELoader": VAELoader,
     "EmptyLatentImage": EmptyLatentImage,
@@ -578,7 +607,7 @@ NODE_CLASS_MAPPINGS = {
     "LoadImage": LoadImage,
     "ImageScale": ImageScale,
     "ConditioningCombine": ConditioningCombine,
-    "ConditioningCombineWeighted": ConditioningCombineWeighted,
+    "ConditioningAddWeighted": ConditioningAddWeighted,
     "ConditioningSetArea": ConditioningSetArea,
     "KSamplerAdvanced": KSamplerAdvanced,
     "LatentComposite": LatentComposite,
